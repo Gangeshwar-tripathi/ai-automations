@@ -16,10 +16,12 @@ import os
 import sounddevice as sd
 
 from PyObjCTools import AppHelper
-from meeting_assistant import MeetingAssistant
 from assistant_functionality import AIService, AudioService
 
 from Cocoa import (
+    NSTextStorage,
+    NSTextContainer,
+    NSLayoutManager,
     NSApplication,
     NSWindow,
     NSTextField,
@@ -45,6 +47,9 @@ from Cocoa import (
     NSEventModifierFlagCommand,
     NSEventModifierFlagOption,
     NSEventMaskKeyDown,
+    NSEventMaskFlagsChanged,
+    NSEventTypeKeyDown,
+    NSEventTypeFlagsChanged,
     NSEvent
 )
 
@@ -182,6 +187,21 @@ class CodeTextView(NSTextView):
         ).keyDown_(event)
 
 
+class PushToTalkButton(NSButton):
+    """
+    Display-only microphone status button.
+
+    Recording is controlled exclusively by the right Option + right Command
+    keyboard combination. No mouse press/release is used.
+    """
+
+    def cancel_push_to_talk(self):
+        controller = getattr(self, "controller", None)
+        if controller is not None and controller.recording:
+            controller.stop_recording()
+
+
+
 # ============================================================
 # APPLICATION
 # ============================================================
@@ -211,29 +231,29 @@ class AppDelegate(NSObject):
 
         # Automatic response-window growth.
         # Compact -> response -> auto-grow sizing.
-        self.compact_window_width = 600
+        self.compact_window_width = 760
         self.compact_window_height = 320
-        self.response_window_min_height = 500
-        self.response_window_max_height = 800
+        self.response_window_min_height = 320
+        self.response_window_max_height = 1200
         self.response_min_window_height = 320
-        self.response_max_window_height = 800
+        self.response_max_window_height = 900
         self.has_answer = False
 
+        # Modern minimal UI sizing.
+        self.content_side_padding = 24
+        self.response_card_padding = 16
+        self.response_card_min_height = 110
+        self.response_card_max_height = 1060
+
         self.recording = False
+        self.ptt_event_monitor = None
+        self.ptt_local_event_monitor = None
         self.audio_data = None
 
         self.whisper_model = None
         self.ai_service = AIService(OLLAMA_URL, MODEL, VISION_MODEL)
         self.audio_service = AudioService(WHISPER_MODEL)
 
-        # Meeting mode state. The meeting assistant listens to the
-        # configured meeting-audio input and sends detected questions
-        # to llama3.2:3b.
-        self.meeting_mode = False
-        self.screenshot_processing = False
-        self.meeting_assistant = MeetingAssistant(
-            self.show_meeting_answer
-        )
 
         self.create_main_window()
         self.start_window_arrow_move()
@@ -268,7 +288,7 @@ class AppDelegate(NSObject):
         frame = NSMakeRect(
             0,
             0,
-            600,
+            760,
             320,
         )
 
@@ -289,7 +309,7 @@ class AppDelegate(NSObject):
             )
         )
 
-        self.window.setTitle_("Private AI Assistant")
+        self.window.setTitle_(" AI Assistant")
         self.window.setLevel_(NSFloatingWindowLevel)
         self.window.setDelegate_(self)
 
@@ -301,11 +321,12 @@ class AppDelegate(NSObject):
         # Keep overlay excluded from supported capture.
         self.window.setSharingType_(NSWindowSharingNone)
 
+        # Modern dark application surface.
+        self.window.setOpaque_(True)
         self.window.setBackgroundColor_(
-               NSColor.colorWithCalibratedWhite_alpha_(
-        0.08,
-        0.55,
-    )
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.055, 0.065, 0.085, 1.0
+            )
         )
 
         self.window.center()
@@ -338,7 +359,7 @@ class AppDelegate(NSObject):
         self.nav_status = (
             NSTextField.alloc()
             .initWithFrame_(
-                NSMakeRect(20, 18, 150, 25)
+                NSMakeRect(90, 18, 130, 25)
             )
         )
         self.nav_status.setStringValue_("AI READY")
@@ -352,6 +373,20 @@ class AppDelegate(NSObject):
         self.nav_status.setBezeled_(False)
         self.nav_status.setEditable_(False)
         self.nav_bar.addSubview_(self.nav_status)
+
+        # Compact Quit button beside the live/status indicator.
+        self.quit_button = NSButton.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 64, 32)
+        )
+        self.quit_button.setTitle_("Quit")
+        self.quit_button.setFont_(NSFont.boldSystemFontOfSize_(12))
+        self.quit_button.setToolTip_("Quit Private AI Assistant")
+        self.quit_button.setBezelStyle_(NSBezelStyleRounded)
+        self.quit_button.setBordered_(True)
+        self.quit_button.setContentTintColor_(NSColor.whiteColor())
+        self.quit_button.setTarget_(self)
+        self.quit_button.setAction_("closeApp:")
+        self.nav_bar.addSubview_(self.quit_button)
 
         def nav_button(x, title, tooltip, action):
             button = NSButton.alloc().initWithFrame_(
@@ -371,12 +406,25 @@ class AppDelegate(NSObject):
 
         # Named buttons are intentionally used instead of SF Symbols so the
         # controls are immediately understandable and render consistently.
-        self.nav_mic_button = nav_button(
-            250,
-            "Microphone",
-            "Start or stop microphone recording",
-            "toggleRecording:",
+        # Microphone status button.
+        # Recording is controlled by Right Option + Right Command.
+        self.nav_mic_button = PushToTalkButton.alloc().initWithFrame_(
+            NSMakeRect(250, 8, 110, 42)
         )
+        self.nav_mic_button.setTitle_("Microphone")
+        self.nav_mic_button.setFont_(
+            NSFont.boldSystemFontOfSize_(12)
+        )
+        self.nav_mic_button.setToolTip_(
+            "Hold Right Option + Right Command to record"
+        )
+        self.nav_mic_button.setAlignment_(1)
+        self.nav_mic_button.setBezelStyle_(NSBezelStyleRounded)
+        self.nav_mic_button.setBordered_(True)
+        self.nav_mic_button.setContentTintColor_(NSColor.blackColor())
+        self.nav_mic_button.controller = self
+        self.nav_bar.addSubview_(self.nav_mic_button)
+
 
         self.nav_screenshot_button = nav_button(
             338,
@@ -406,13 +454,6 @@ class AppDelegate(NSObject):
             "toggleViewOnly:",
         )
 
-        self.nav_meeting_button = nav_button(
-            690,
-            "Meeting",
-            "Start or stop meeting listening",
-            "toggleMeeting:",
-        )
-
         self.status = (
             NSTextField.alloc()
             .initWithFrame_(
@@ -434,8 +475,6 @@ class AppDelegate(NSObject):
         self.status.setEditable_(False)
         self.nav_bar.addSubview_(self.status)
 
-        # Keep compatibility with existing meeting/status code.
-        self.meeting_button = self.nav_meeting_button
         self.screenshot_button = self.nav_screenshot_button
 
         self.view_only = False
@@ -456,7 +495,9 @@ class AppDelegate(NSObject):
         self.ask_label.setFont_(
             NSFont.boldSystemFontOfSize_(13)
         )
-        self.ask_label.setTextColor_(NSColor.blackColor())
+        self.ask_label.setTextColor_(NSColor.colorWithCalibratedRed_green_blue_alpha_(
+            0.90, 0.92, 0.96, 1.0
+        ))
         self.ask_label.setDrawsBackground_(False)
         self.ask_label.setBezeled_(False)
         self.ask_label.setEditable_(False)
@@ -470,6 +511,17 @@ class AppDelegate(NSObject):
         )
         self.prompt.setFont_(
             NSFont.systemFontOfSize_(15)
+        )
+        self.prompt.setTextColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.90, 0.92, 0.96, 1.0
+            )
+        )
+        self.prompt.setDrawsBackground_(True)
+        self.prompt.setBackgroundColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.09, 0.10, 0.13, 1.0
+            )
         )
         self.prompt.setPlaceholderString_(
             "Type or speak your question..."
@@ -496,12 +548,14 @@ class AppDelegate(NSObject):
             "AI RESPONSE"
         )
         self.response_header.setFont_(
-            NSFont.boldSystemFontOfSize_(14)
+            NSFont.systemFontOfSize_weight_(12, 0.55)
         )
         self.response_header.setAlignment_(0)
         self.response_header.setBordered_(False)
         self.response_header.setContentTintColor_(
-            NSColor.blackColor()
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.60, 0.65, 0.72, 1.0
+            )
         )
         self.response_header.setTarget_(self)
         self.response_header.setAction_("toggleResponse:")
@@ -514,10 +568,21 @@ class AppDelegate(NSObject):
         self.response_scroll = (
             NSScrollView.alloc()
             .initWithFrame_(
-                NSMakeRect(25, 345, 695, 225)
+                NSMakeRect(24, 345, 695, 225)
             )
         )
         self.response_scroll.setHasVerticalScroller_(True)
+        self.response_scroll.setHasHorizontalScroller_(False)
+        self.response_scroll.setBorderType_(0)
+        # Never use the default white NSScrollView background.
+        self.response_scroll.setDrawsBackground_(True)
+        self.response_scroll.setBackgroundColor_(
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.075, 0.085, 0.105, 1.0
+            )
+        )
+        self.response_scroll.setAutohidesScrollers_(True)
+        self.response_scroll.setScrollerStyle_(1)
 
         self.response_view = (
             NSTextView.alloc()
@@ -527,14 +592,24 @@ class AppDelegate(NSObject):
         )
         self.response_view.setEditable_(False)
         self.response_view.setSelectable_(True)
+        self.response_view.setRichText_(True)
+        self.response_view.setDrawsBackground_(False)
+        # Clean white response text on the dark response surface.
+        self.response_view.setTextColor_(
+            NSColor.colorWithCalibratedWhite_alpha_(
+                0.97, 1.0
+            )
+        )
         self.response_view.setFont_(
-            NSFont.systemFontOfSize_(15)
+            NSFont.systemFontOfSize_(16)
         )
-        self.response_view.setTextColor_(NSColor.blackColor())
-        self.response_view.setBackgroundColor_(
-            NSColor.colorWithCalibratedWhite_alpha_(0.97, 1.0)
+        self.response_view.setTextContainerInset_(
+            NSMakeSize(16, 14)
         )
-        self.response_view.setRichText_(False)
+        self.response_view.textContainer().setLineFragmentPadding_(0)
+        self.response_view.setHorizontallyResizable_(False)
+        self.response_view.setVerticallyResizable_(True)
+        self.response_view.setAutoresizingMask_(1 | 16)
         self.response_scroll.setDocumentView_(
             self.response_view
         )
@@ -591,7 +666,9 @@ class AppDelegate(NSObject):
             NSColor.blackColor()
         )
         self.code_view.setBackgroundColor_(
-            NSColor.colorWithCalibratedWhite_alpha_(0.97, 1.0)
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.055, 0.065, 0.085, 1.0
+            )
         )
         self.code_view.setRichText_(False)
         self.code_scroll.setDocumentView_(self.code_view)
@@ -613,7 +690,7 @@ class AppDelegate(NSObject):
 
         self.response_view.setString_(
             "Definition:\n\n"
-            "Ask a question by typing or using the microphone, "
+            "Ask a question by typing or holding the microphone button, "
             "or capture the screen for visual understanding.\n\n"
             "Key Points:\n\n"
             "• Microphone — speak a question.\n"
@@ -627,6 +704,9 @@ class AppDelegate(NSObject):
 
         self.layout_main_ui()
 
+        # Option + Command keyboard push-to-talk.
+        self.install_push_to_talk_monitor()
+
         # Explicitly bring the main window to the foreground on startup.
         self.window.orderFrontRegardless()
         self.window.makeKeyAndOrderFront_(None)
@@ -639,7 +719,7 @@ class AppDelegate(NSObject):
     def windowWillResize_toSize_(self, window, size):
         # Keep the UI usable at all times.
         return NSMakeSize(
-            max(560.0, size.width),
+            max(680.0, size.width),
             max(320.0, size.height),
         )
 
@@ -656,28 +736,23 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def layout_main_ui(self):
-        """Modern compact layout that expands only when an answer exists."""
+        """Deterministic responsive layout for the modern minimal UI."""
 
         if not hasattr(self, "window"):
             return
 
         bounds = self.window.contentView().bounds()
-        w = max(560.0, bounds.size.width)
+        w = max(680.0, bounds.size.width)
         h = max(320.0, bounds.size.height)
 
-        pad = 24
-        nav_h = 54
+        pad = 24.0
+        nav_h = 54.0
 
         # --------------------------------------------------------
         # NAV BAR
         # --------------------------------------------------------
         self.nav_bar.setFrame_(
-            NSMakeRect(
-                0,
-                h - nav_h,
-                w,
-                nav_h,
-            )
+            NSMakeRect(0, h - nav_h, w, nav_h)
         )
 
         self.nav_status.setFrame_(
@@ -685,17 +760,26 @@ class AppDelegate(NSObject):
         )
 
         self.status.setFrame_(
-            NSMakeRect(w - 125, 15, 105, 24)
+            NSMakeRect(w - 190, 15, 105, 24)
         )
+        if hasattr(self, "quit_button"):
+            # Place Quit directly beside the live/status indicator.
+            status_frame = self.status.frame()
+            self.quit_button.setFrame_(
+                NSMakeRect(
+                    status_frame.origin.x + status_frame.size.width + 8,
+                    11,
+                    64,
+                    32,
+                )
+            )
 
-        # Keep navigation controls compact.
         buttons = [
             self.nav_mic_button,
             self.nav_screenshot_button,
             self.nav_code_button,
             self.nav_definition_button,
             self.nav_view_button,
-            self.nav_meeting_button,
         ]
 
         visible = [
@@ -709,24 +793,20 @@ class AppDelegate(NSObject):
             "Code": 64,
             "Definition": 92,
             "View": 64,
-            "Meeting": 78,
         }
 
-        gap = 5
+        gap = 5.0
         total_width = sum(
             button_widths.get(str(button.title()), 80)
             for button in visible
         )
         total_width += max(0, len(visible) - 1) * gap
 
-        left_limit = 155
-        right_limit = w - 125
+        left_limit = 155.0
+        right_limit = w - 125.0
 
-        if total_width <= max(0, right_limit - left_limit):
-            x = max(
-                left_limit,
-                (w - total_width) / 2,
-            )
+        if total_width <= max(0.0, right_limit - left_limit):
+            x = max(left_limit, (w - total_width) / 2.0)
 
             for button in visible:
                 width = button_widths.get(
@@ -741,7 +821,7 @@ class AppDelegate(NSObject):
         # --------------------------------------------------------
         # PROMPT
         # --------------------------------------------------------
-        prompt_y = h - nav_h - 112
+        prompt_y = h - nav_h - 112.0
 
         self.ask_label.setFrame_(
             NSMakeRect(
@@ -756,83 +836,78 @@ class AppDelegate(NSObject):
             NSMakeRect(
                 pad,
                 prompt_y,
-                w - 2 * pad,
+                w - (2.0 * pad),
                 40,
             )
         )
 
-        # --------------------------------------------------------
-        # RESPONSE
-        # --------------------------------------------------------
         if not self.has_answer:
-            # Prompt-only compact mode.
             self.response_header.setHidden_(True)
             self.response_scroll.setHidden_(True)
             self.code_header.setHidden_(True)
             self.code_scroll.setHidden_(True)
             return
 
+        # --------------------------------------------------------
+        # RESPONSE CARD
+        # --------------------------------------------------------
         self.response_header.setHidden_(False)
 
-        response_header_y = prompt_y - 42
+        header_y = prompt_y - 42.0
 
         self.response_header.setFrame_(
             NSMakeRect(
                 pad,
-                response_header_y,
-                w - 2 * pad,
+                header_y,
+                w - (2.0 * pad),
                 30,
             )
         )
 
-        # Use all available space below the response header.
-        response_y = 28
+        # The response card always occupies the space between the
+        # header and the bottom padding. Window height is changed by
+        # grow_response_window(), not by this method.
+        response_y = 24.0
         response_h = max(
-            120,
-            response_header_y - response_y - 10,
+            self.response_card_min_height,
+            header_y - response_y - 10.0,
         )
 
         self.response_scroll.setFrame_(
             NSMakeRect(
                 pad,
                 response_y,
-                w - 2 * pad,
+                w - (2.0 * pad),
                 response_h,
             )
         )
         self.response_scroll.setHidden_(False)
 
-        # Code remains hidden until code is actually available.
-        if self.code_header.isHidden():
-            self.code_scroll.setHidden_(True)
-            return
+        # The document view width must exactly match the scroll view's
+        # content width. Height is controlled by grow_response_window().
+        document_width = max(
+            200.0,
+            w - (2.0 * pad) - 4.0,
+        )
 
-        code_header_y = response_y + response_h + 8
+        current_doc_height = max(
+            response_h,
+            self.response_view.frame().size.height,
+        )
 
-        self.code_header.setFrame_(
-            NSMakeRect(
-                pad,
-                code_header_y,
-                w - 2 * pad,
-                30,
+        self.response_view.setFrameSize_(
+            NSMakeSize(
+                document_width,
+                current_doc_height,
             )
         )
 
-        if self.code_expanded:
-            self.code_scroll.setFrame_(
-                NSMakeRect(
-                    pad,
-                    60,
-                    w - 2 * pad,
-                    max(
-                        40,
-                        code_header_y - 68,
-                    ),
-                )
-            )
-            self.code_scroll.setHidden_(False)
-        else:
-            self.code_scroll.setHidden_(True)
+        self.response_view.textContainer().setContainerSize_(
+            NSMakeSize(document_width - 4.0, 1000000.0)
+        )
+
+        self.code_header.setHidden_(True)
+        self.code_scroll.setHidden_(True)
 
     # ========================================================
     # MOVE MAIN WINDOW WITH OPTION + ARROW KEYS
@@ -910,34 +985,35 @@ class AppDelegate(NSObject):
             self._window_move_monitor = None
 
     def windowWillClose_(self, notification):
+
+        self.remove_push_to_talk_monitor()
         self.stop_window_arrow_move()
 
         try:
-            if self.meeting_mode:
-                self.meeting_mode = False
-                self.meeting_assistant.stop()
+            if False:
+                        None.stop()
         except Exception:
             pass
         try:
             if self.recording:
                 self.recording = False
-                sd.stop()
         except Exception:
             pass
 
     def closeApp_(self, sender):
+        self.nav_mic_button.cancel_push_to_talk()
+
+        self.remove_push_to_talk_monitor()
         self.stop_window_arrow_move()
 
         try:
-            if self.meeting_mode:
-                self.meeting_mode = False
-                self.meeting_assistant.stop()
+            if False:
+                        None.stop()
         except Exception:
             pass
         try:
             if self.recording:
                 self.recording = False
-                sd.stop()
         except Exception:
             pass
         NSApplication.sharedApplication().terminate_(self)
@@ -969,91 +1045,6 @@ class AppDelegate(NSObject):
         self.layout_main_ui()
 
     # ========================================================
-    # MEETING MODE
-    # ========================================================
-
-    def toggleMeeting_(self, sender):
-
-        if self.meeting_mode:
-
-            self.meeting_mode = False
-
-            self.meeting_assistant.stop()
-
-            self._set_nav_icon(
-                self.meeting_button, "headphones", "MEET"
-            )
-
-            self.set_status(
-                "● LOCAL AI",
-                NSColor.systemGreenColor(),
-            )
-
-            return
-
-        self.meeting_mode = True
-
-        self._set_nav_icon(
-            self.meeting_button, "headphones.circle.fill", "MEET"
-        )
-
-        self.set_status(
-            "● LISTENING...",
-            NSColor.systemRedColor(),
-        )
-
-        try:
-            self.meeting_assistant.start()
-        except Exception as error:
-            self.meeting_mode = False
-            self._set_nav_icon(
-                self.meeting_button, "headphones", "MEET"
-            )
-            self.show_error(
-                f"Unable to start meeting mode.\n\n{error}"
-            )
-
-    @objc.python_method
-    def show_meeting_answer(
-        self,
-        question,
-        answer,
-    ):
-
-        # MeetingAssistant invokes this callback from its worker
-        # thread, so update Cocoa UI on the main thread.
-        AppHelper.callAfter(
-            self._show_meeting_answer_ui,
-            question,
-            answer,
-        )
-
-    @objc.python_method
-    def _show_meeting_answer_ui(
-        self,
-        question,
-        answer,
-    ):
-
-        self.prompt.setStringValue_(
-            question
-        )
-
-        self.response_view.setString_(
-            "Question:\n\n"
-            + question
-            + "\n\n"
-            + answer.strip()
-        )
-
-        self.show_answer_controls()
-
-        self.set_status(
-            "● MEETING AI",
-            NSColor.systemGreenColor(),
-        )
-
-    # ========================================================
     # SCREENSHOT -> LLAVA -> LLAMA
     # ========================================================
 
@@ -1062,7 +1053,7 @@ class AppDelegate(NSObject):
             return
         self.screenshot_processing = True
         self.screenshot_button.setEnabled_(False)
-        self.mic_button.setEnabled_(False)
+        self.mic_button.setEnabled_(True)
         self.set_status("● CAPTURING SCREEN...", NSColor.systemOrangeColor())
         self.response_view.setString_("Capturing screen...")
         self.window.orderOut_(None)
@@ -1086,7 +1077,10 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _show_screen_answer(self, answer, screen_context):
         self.response_view.setString_(answer.strip())
+        self._set_response_text_white()
         self.code_view.setString_(screen_context.strip())
+        self.has_answer = True
+        self.grow_response_window()
         self.show_answer_controls()
         self.set_status("● SCREEN AI", NSColor.systemGreenColor())
 
@@ -1117,41 +1111,100 @@ class AppDelegate(NSObject):
     # ========================================================
 
     @objc.python_method
-    def start_recording(self):
+    def install_push_to_talk_monitor(self):
+        """
+        Right-side keyboard push-to-talk.
 
-        if self.whisper_model is None:
+        Right Option keyCode 61
+        Right Command keyCode 54
 
-            self.set_status(
-                "● VOICE MODEL LOADING...",
-                NSColor.systemOrangeColor(),
+        Press both -> start recording.
+        Release either -> stop recording and process the response.
+        """
+
+        if self.ptt_event_monitor is not None:
+            return
+
+        def handler(event):
+            flags = event.modifierFlags()
+            key_code = event.keyCode()
+
+            # Right Option = 61, Right Command = 54.
+            # Ignore left-side modifier changes.
+            if key_code not in (54, 61):
+                return event
+
+            right_option = bool(flags & NSEventModifierFlagOption)
+            right_command = bool(flags & NSEventModifierFlagCommand)
+
+            if right_option and right_command:
+                if not self.recording:
+                    self.start_recording()
+            else:
+                if self.recording:
+                    self.stop_recording()
+
+            return event
+
+        self.ptt_event_monitor = (
+            NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskFlagsChanged,
+                handler,
             )
+        )
 
+        # Also monitor events generated while this application is active.
+        self.ptt_local_event_monitor = (
+            NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+                NSEventMaskFlagsChanged,
+                handler,
+            )
+        )
+
+    def remove_push_to_talk_monitor(self):
+        if self.ptt_event_monitor is not None:
+            NSEvent.removeMonitor_(self.ptt_event_monitor)
+            self.ptt_event_monitor = None
+
+        if getattr(self, "ptt_local_event_monitor", None) is not None:
+            NSEvent.removeMonitor_(self.ptt_local_event_monitor)
+            self.ptt_local_event_monitor = None
+
+
+    def start_recording(self):
+        """
+        Start push-to-talk recording immediately.
+
+        Whisper is intentionally NOT checked here. The user should be able
+        to hold the microphone button for exactly as long as required.
+        Whisper is loaded during transcription after release.
+        """
+
+        if self.recording:
             return
 
         self.recording = True
+        self.audio_data = None
+        self.audio_chunks = []
 
-        self.audio_data = []
-
-        self._set_nav_icon(self.mic_button, "stop.fill", "STOP")
-
-        self.status.setStringValue_(
-            "● LISTENING..."
+        self._set_nav_icon(
+            self.mic_button,
+            "mic.fill",
+            "● Recording...",
         )
 
-        self.status.setTextColor_(
-            NSColor.systemRedColor()
-        )
+        self.status.setStringValue_("● LISTENING...")
+        self.status.setTextColor_(NSColor.systemRedColor())
 
         self.response_view.setString_(
-            "Listening...\n\nSpeak your question."
+            "Listening...\n\nRelease the microphone button when you finish speaking."
         )
 
-        thread = threading.Thread(
+        threading.Thread(
             target=self.record_audio,
             daemon=True,
-        )
+        ).start()
 
-        thread.start()
 
     # ========================================================
     # RECORD AUDIO
@@ -1159,36 +1212,82 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def record_audio(self):
+        """Capture audio continuously until the push-to-talk control is released."""
+
+        stream = None
 
         try:
+            self.audio_chunks = []
 
-            recording = sd.rec(
-                int(
-                    MAX_RECORD_SECONDS
-                    * SAMPLE_RATE
-                ),
+            def audio_callback(indata, frames, time_info, status):
+                if status:
+                    print(f"Audio input status: {status}")
+
+                if self.recording:
+                    self.audio_chunks.append(indata.copy())
+
+            stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
                 channels=CHANNELS,
                 dtype="int16",
+                callback=audio_callback,
+                blocksize=0,
             )
 
-            # Wait until recording finishes
-            # or stop_recording is called.
+            self.audio_stream = stream
+            stream.start()
+
+            started_at = time.monotonic()
+
             while self.recording:
+                # Safety limit.
+                if time.monotonic() - started_at >= MAX_RECORD_SECONDS:
+                    AppHelper.callAfter(
+                        self._max_recording_reached
+                    )
+                    break
 
-                time.sleep(0.05)
+                time.sleep(0.02)
 
-            sd.stop()
+            if stream is not None:
+                stream.stop()
+                stream.close()
+                stream = None
 
-            self.audio_data = recording
+            self.audio_stream = None
 
-            AppHelper.callAfter(
-                self.transcribe_audio,
-            )
+            if self.audio_chunks:
+                try:
+                    import numpy as np
+                    self.audio_data = np.concatenate(
+                        self.audio_chunks,
+                        axis=0,
+                    )
+                except Exception:
+                    self.audio_data = self.audio_chunks[0]
+            else:
+                self.audio_data = None
+
+            if self.audio_data is not None:
+                AppHelper.callAfter(
+                    self.transcribe_audio,
+                )
+            else:
+                AppHelper.callAfter(
+                    self.show_error,
+                    "No audio was captured. Check your microphone permission.",
+                )
 
         except Exception as error:
-
             self.recording = False
+            self.audio_stream = None
+
+            try:
+                if stream is not None:
+                    stream.stop()
+                    stream.close()
+            except Exception:
+                pass
 
             AppHelper.callAfter(
                 self.show_error,
@@ -1198,6 +1297,11 @@ class AppDelegate(NSObject):
                 ),
             )
 
+    def _max_recording_reached(self):
+        if self.recording:
+            self.stop_recording()
+
+
     # ========================================================
     # STOP RECORDING
     # ========================================================
@@ -1205,16 +1309,15 @@ class AppDelegate(NSObject):
     @objc.python_method
     def stop_recording(self):
 
+        if not self.recording:
+            return
+
         self.recording = False
 
-        if self.meeting_mode:
-            self.meeting_mode = False
-            self.meeting_assistant.stop()
-            self._set_nav_icon(
-                self.meeting_button, "headphones", "MEET"
-            )
-
-        self._set_nav_icon(self.mic_button, "mic.fill", "MIC")
+        # InputStream is stopped by record_audio after seeing recording=False.
+        # Do not call sd.stop() here because it can interfere with other
+        # CoreAudio streams on macOS.
+        self._set_nav_icon(self.mic_button, "mic.fill", "Microphone")
 
         self.status.setStringValue_(
             "● TRANSCRIBING..."
@@ -1232,18 +1335,41 @@ class AppDelegate(NSObject):
     def transcribe_audio(self):
         try:
             if self.audio_data is None:
-                self.show_error("No audio recorded.")
+                self.show_error(
+                    "No audio was captured. Please hold the Microphone button while speaking."
+                )
                 return
-            text = self.audio_service.transcribe(self.audio_data, SAMPLE_RATE)
-            AppHelper.callAfter(self.process_transcription, text)
+
+            self.status.setStringValue_("● LOADING VOICE AI...")
+
+            # Lazy-load Whisper after recording. This avoids loading the
+            # native Whisper stack during application startup.
+            if self.whisper_model is None:
+                self.whisper_model = self.audio_service.load()
+
+            self.status.setStringValue_("● TRANSCRIBING...")
+
+            text = self.audio_service.transcribe(
+                self.audio_data,
+                SAMPLE_RATE,
+            )
+
+            text = (text or "").strip()
+
+            if not text:
+                self.show_error(
+                    "No speech detected. Please hold the Microphone button and speak clearly."
+                )
+                return
+
+            self.process_transcription(text)
+
         except Exception as error:
-            AppHelper.callAfter(self.show_error, f"Speech recognition error:\n\n{error}")
+            self.show_error(
+                f"Unable to transcribe audio.\n\n{error}"
+            )
 
-    # ========================================================
-    # PROCESS SPEECH
-    # ========================================================
 
-    @objc.python_method
     def process_transcription(
         self,
         text,
@@ -1503,6 +1629,25 @@ Rules:
     # ========================================================
 
     @objc.python_method
+    def _set_response_text_white(self):
+        """Keep all normal AI response text white, regardless of macOS appearance."""
+        if not hasattr(self, "response_view"):
+            return
+
+        white = NSColor.colorWithCalibratedWhite_alpha_(0.97, 1.0)
+        self.response_view.setTextColor_(white)
+
+        # NSTextView can retain an attributed-string foreground color after
+        # setString_. Re-apply white to the complete plain-text content.
+        storage = self.response_view.textStorage()
+        if storage is not None and storage.length() > 0:
+            storage.addAttribute_value_range_(
+                "NSForegroundColor",
+                white,
+                (0, storage.length()),
+            )
+
+    @objc.python_method
     def show_stream(
         self,
         answer,
@@ -1518,6 +1663,10 @@ Rules:
         self.response_view.setString_(
             visible
         )
+        self._set_response_text_white()
+
+        # Keep streaming clean and minimal while the card grows.
+        self.response_view.setDrawsBackground_(False)
 
         # First streamed content switches from compact prompt-only mode
         # to the response layout, then grows as more text arrives.
@@ -1540,8 +1689,8 @@ Rules:
         if code_font is None:
             code_font = NSFont.monospacedSystemFontOfSize_weight_(13.0, 0.0)
 
-        normal_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
-            0.12, 0.13, 0.15, 1.0
+        normal_color = NSColor.colorWithCalibratedWhite_alpha_(
+            0.97, 1.0
         )
         code_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(
             0.86, 0.90, 0.96, 1.0
@@ -1655,71 +1804,65 @@ Rules:
 
     @objc.python_method
     def grow_response_window(self):
-        """Grow the window according to the actual rendered response height."""
-
-        if not hasattr(self, "window") or not hasattr(self, "response_view"):
+        """Grow the OUTER window together with the AI response card."""
+        if not hasattr(self, "response_view") or not hasattr(self, "response_scroll"):
             return
 
-        if not self.response_expanded or self.view_only:
-            return
-
-        self.has_answer = True
-
-        # Lay out first so wrapped lines are included in the measurement.
-        self.layout_main_ui()
-
-        layout_manager = self.response_view.layoutManager()
-        text_container = self.response_view.textContainer()
-        layout_manager.ensureLayoutForTextContainer_(text_container)
-
-        used_rect = layout_manager.usedRectForTextContainer_(text_container)
-
-        # Height actually required by the rendered response.
-        required_text_height = max(
-            90.0,
-            used_rect.size.height + 32.0,
-        )
-
-        # Space occupied by navigation, prompt and response header.
-        non_response_height = 215.0
-
-        desired_height = max(
-            self.response_window_min_height,
-            required_text_height + non_response_height,
-        )
-        desired_height = min(
-            desired_height,
-            self.response_window_max_height,
-        )
-
-        current_frame = self.window.frame()
-        current_height = current_frame.size.height
-
-        # Grow only when content needs more room; avoid streaming jitter.
-        if desired_height > current_height + 12:
-            current_frame.origin.y -= (
-                desired_height - current_height
-            )
-            current_frame.size.height = desired_height
-
-            self.window.setFrame_display_animate_(
-                current_frame,
-                True,
-                False,
-            )
-
-            self.layout_main_ui()
-
-        # Keep the newest streamed content visible.
         try:
-            length = len(self.response_view.string() or "")
-            self.response_view.scrollRangeToVisible_((length, 0))
-        except Exception:
-            pass
+            text = self.response_view.string() or ""
+            width = max(
+                300.0,
+                self.response_scroll.frame().size.width
+                - (self.content_side_padding * 2),
+            )
 
-    # ========================================================
-    # FINISH
-    # ========================================================
+            font = self.response_view.font() or NSFont.systemFontOfSize_(16.0)
+            storage = NSTextStorage.alloc().initWithString_attributes_(
+                text, {"NSFont": font}
+            )
+            container = NSTextContainer.alloc().initWithContainerSize_(
+                NSMakeSize(width, 100000.0)
+            )
+            container.setLineFragmentPadding_(0.0)
+
+            layout = NSLayoutManager.alloc().init()
+            layout.addTextContainer_(container)
+            storage.addLayoutManager_(layout)
+
+            used = layout.usedRectForTextContainer_(container)
+            text_height = max(1.0, used.size.height)
+
+            card_height = min(
+                self.response_card_max_height,
+                max(self.response_card_min_height, text_height + 32.0),
+            )
+
+            # The complete window height follows the response card height.
+            chrome_height = 190.0
+            desired_height = min(
+                self.response_window_max_height,
+                max(self.response_window_min_height, chrome_height + card_height),
+            )
+
+            frame = self.window.frame()
+            current_height = frame.size.height
+
+            # Keep the top of the window in the same place while it grows.
+            new_frame = NSMakeRect(
+                frame.origin.x,
+                frame.origin.y - (desired_height - current_height),
+                frame.size.width,
+                desired_height,
+            )
+
+            self.window.setFrame_display_animate_(new_frame, True, False)
+
+            # Re-layout the entire window so the response card fills the
+            # newly-created space instead of growing inside a fixed window.
+            self._layout_content(new_frame.size.width, new_frame.size.height)
+
+        except Exception as exc:
+            print(f"Response window resize error: {exc}")
 
     @objc.python_method
     def finish_answer(
@@ -1762,6 +1905,7 @@ Rules:
 
         # Keep the complete final answer, including code, in the main response.
         self.apply_response_code_colors(clean_answer)
+        self._set_response_text_white()
 
         self.has_answer = True
         self.grow_response_window()
@@ -1802,7 +1946,7 @@ Rules:
 
         self.recording = False
 
-        self._set_nav_icon(self.mic_button, "mic.fill", "MIC")
+        self._set_nav_icon(self.mic_button, "mic.fill", "Microphone")
 
         self.response_view.setString_(
             message
@@ -2310,7 +2454,9 @@ Rules:
         )
 
         self.popup_window.setBackgroundColor_(
-            NSColor.colorWithCalibratedWhite_alpha_(0.94, 1.0)
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.055, 0.065, 0.085, 1.0
+            )
         )
 
         content = (
@@ -2453,7 +2599,9 @@ Rules:
         )
 
         self.popup_code_view.setBackgroundColor_(
-            NSColor.whiteColor()
+            NSColor.colorWithCalibratedRed_green_blue_alpha_(
+                0.055, 0.065, 0.085, 1.0
+            )
         )
 
         self.popup_code_view.setRichText_(

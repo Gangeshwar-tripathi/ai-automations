@@ -88,24 +88,13 @@ Question:
 Recent context:
 {context}
 
-Give a concise answer the user can use in a professional technical meeting.
-
-Format:
-Definition:
-1-2 clear sentences.
-
-Key Points:
-- Important point
-- Important point
-- Important point
-
+Give a concise answer the user can use in a professional technical interview .
 Suggested Response:
 A natural human response the user can say in the meeting.
 
 Rules:
-- Be accurate.
-- Do not invent facts.
-- If uncertain, say so.
+- Be accurate based on 4+ years of experience.
+- give me the method to or function to solve the problem.
 - Maximum 200 words.
 - Python code should be in one markdown code block.
 """.strip()
@@ -183,26 +172,15 @@ The following information was extracted from a screenshot by a vision model:
 {screen_context}
 --- END SCREEN CONTEXT ---
 
-Give the user a concise answer they can use in a professional technical meeting.
-
-Format:
-Definition:
-1-2 clear sentences.
-
-Key Points:
-- Important point
-- Important point
-- Important point
+Give the user a concise answer they can use in a professional technical  interview.
 
 Suggested Response:
-A natural response the user can say in the meeting.
+A natural human response the user can say in the interview .
 
 Rules:
-- Use only information supported by the screen context.
 - Do not invent facts.
-- If the screenshot does not contain enough information, clearly say what is missing.
-- Maximum 120 words.
-- If code is required, put all code in one markdown code block.
+- Maximum 400 words.
+- 
 """.strip()
         payload = {
             "model": self.model,
