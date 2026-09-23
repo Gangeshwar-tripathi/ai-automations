@@ -1,0 +1,2 @@
+# ai-automations
+Basic AI 
