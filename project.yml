@@ -1,0 +1,23 @@
+name: AIMacAssistant
+options:
+  bundleIdPrefix: com.local
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    SWIFT_VERSION: 5.0
+    MACOSX_DEPLOYMENT_TARGET: 13.0
+targets:
+  AIMacAssistant:
+    type: application
+    platform: macOS
+    sources:
+      - AIMacAssistant
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.local.AIMacAssistant
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "AI Assistant needs microphone access to understand spoken context."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "AI Assistant uses speech recognition to convert speech into text."
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
